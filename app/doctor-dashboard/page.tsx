@@ -6,7 +6,9 @@ import { Button } from "@/components/ui/button";
 import Image from "next/image";
 
 export default function DoctorDashboard() {
-  const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
+  const [selectedPatient, setSelectedPatient] = useState<any | null>(null);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<Array<{ role: string; content: string }>>([]);
   const [chatInput, setChatInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -181,10 +183,101 @@ export default function DoctorDashboard() {
     );
   };
 
-  // Handler for scanning a new patient (to be implemented)
-  const handleScanNewPatient = () => {
-    alert('Scan New Patient functionality coming soon!');
-  }
+  // Scan and lookup patient by fingerprint
+  const handleScanNewPatient = async () => {
+    setLookupError(null);
+    setLookupLoading(true);
+    setSelectedPatient(null);
+    try {
+      // 1. Capture fingerprint
+      const response = await fetch("http://localhost:8080/CallMorphoAPI?5", { method: "POST" });
+      const data = await response.json();
+      if (Number(data.ReturnCode) !== 0) {
+        setLookupError("Fingerprint device error: " + data.ReturnCode);
+        setLookupLoading(false);
+        return;
+      }
+      const template = data.Base64ISOTemplate;
+      // 2. Lookup patient in backend
+      const lookupRes = await fetch("http://localhost:5000/find_patient", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fingerprint_template: template })
+      });
+      const lookupData = await lookupRes.json();
+      if (lookupData.success && lookupData.patient) {
+        setSelectedPatient(lookupData.patient);
+        setLookupError(null);
+        // AI summary for real patients
+        const p = lookupData.patient;
+        let summary = `Patient Summary for ${p.name} (from fingerprint):\n- Age: ${p.age}, Gender: ${p.gender}\n- Blood Type: ${p.bloodType}\n- Emergency Contact: ${p.emergencyContact?.name} (${p.emergencyContact?.relation}), Phone: ${p.emergencyContact?.number}\n`;
+        if (p.medicalFiles && p.medicalFiles.length > 0) {
+          summary += `- Medical Files by Type:\n`;
+          const byType: Record<string, string[]> = {};
+          p.medicalFiles.forEach((file: any) => {
+            const type = file.type || "Other";
+            if (!byType[type]) byType[type] = [];
+            byType[type].push(file.filename);
+          });
+          Object.entries(byType).forEach(([type, files]) => {
+            summary += `  * ${type}: ${files.join(", ")}\n`;
+          });
+        } else {
+          summary += "- No medical files uploaded.\n";
+        }
+        setChatMessages([{ role: "assistant", content: summary }]);
+      } else {
+        setSelectedPatient(null);
+        setLookupError("No patient found");
+      }
+    } catch (err) {
+      setLookupError("Failed to connect to device or server.");
+    } finally {
+      setLookupLoading(false);
+    }
+  };
+
+  // Helper to check if patient is a mock patient (has medicalHistory)
+  const isMockPatient = (patient: any) => !!patient.medicalHistory;
+
+  // Helper to group real patient files by type field
+  const groupFilesByType = (files: any[]) => {
+    const groups: Record<string, any[]> = {
+      blood: [],
+      xray: [],
+      mri: [],
+      ecg: [],
+      ct: [],
+      general: [],
+      prescription: [],
+      other: [],
+    };
+    files.forEach(file => {
+      const type = (file.type || "other").toLowerCase();
+      if (type.includes("blood")) groups.blood.push(file);
+      else if (type.includes("xray") || type.includes("x-ray")) groups.xray.push(file);
+      else if (type.includes("mri")) groups.mri.push(file);
+      else if (type.includes("ecg")) groups.ecg.push(file);
+      else if (type.includes("ct")) groups.ct.push(file);
+      else if (type.includes("prescription")) groups.prescription.push(file);
+      else if (type.includes("general")) groups.general.push(file);
+      else groups.other.push(file);
+    });
+    return groups;
+  };
+
+  // Helper to open base64 image in new tab
+  const handleViewReport = (file: any) => {
+    if (file.data) {
+      // Try to guess file type from filename
+      let mime = "image/png";
+      if (file.filename && file.filename.toLowerCase().endsWith(".jpg")) mime = "image/jpeg";
+      if (file.filename && file.filename.toLowerCase().endsWith(".jpeg")) mime = "image/jpeg";
+      if (file.filename && file.filename.toLowerCase().endsWith(".pdf")) mime = "application/pdf";
+      const url = `data:${mime};base64,${file.data}`;
+      window.open(url, "_blank");
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gray-100">
@@ -197,8 +290,9 @@ export default function DoctorDashboard() {
               onClick={handleScanNewPatient}
               variant="default"
               className="font-semibold"
+              disabled={lookupLoading}
             >
-              Scan New Patient
+              {lookupLoading ? "Scanning..." : "Scan New Patient"}
             </Button>
             {patients.map(patient => (
               <Button
@@ -258,6 +352,9 @@ export default function DoctorDashboard() {
 
         {/* Right Columns - Medical Records */}
         <div className="col-span-3 space-y-6">
+          {lookupError && (
+            <div className="bg-red-100 text-red-700 p-4 rounded-lg text-center font-semibold">{lookupError}</div>
+          )}
           {selectedPatient ? (
             <>
               <div className="bg-white p-4 rounded-lg shadow">
@@ -275,37 +372,142 @@ export default function DoctorDashboard() {
                 <div>
                   <h3 className="text-lg font-semibold text-red-700 mb-1">Emergency Contact</h3>
                   <div className="text-sm text-gray-700">
-                    <div><span className="font-medium">Name:</span> {selectedPatient.emergencyContact.name}</div>
-                    <div><span className="font-medium">Relation:</span> {selectedPatient.emergencyContact.relation}</div>
-                    <div><span className="font-medium">Phone:</span> {selectedPatient.emergencyContact.phone}</div>
+                    <div><span className="font-medium">Name:</span> {selectedPatient.emergencyContact?.name}</div>
+                    <div><span className="font-medium">Relation:</span> {selectedPatient.emergencyContact?.relation}</div>
+                    <div><span className="font-medium">Phone:</span> {selectedPatient.emergencyContact?.number}</div>
                   </div>
                 </div>
               </div>
+              {/* Medical Files Section */}
               <div className="grid grid-cols-2 gap-6">
-                <RecordList
-                  title="Blood Reports"
-                  records={selectedPatient.medicalHistory.bloodReports}
-                />
-                <RecordList
-                  title="X-Ray Reports"
-                  records={selectedPatient.medicalHistory.xrays}
-                />
-                <RecordList
-                  title="ECG Reports"
-                  records={selectedPatient.medicalHistory.ecgReports}
-                />
-                <RecordList
-                  title="General Reports"
-                  records={selectedPatient.medicalHistory.generalReports}
-                />
-                <RecordList
-                  title="MRI Reports"
-                  records={selectedPatient.medicalHistory.mriReports}
-                />
-                <RecordList
-                  title="CT Scan Reports"
-                  records={selectedPatient.medicalHistory.ctScanReports}
-                />
+                {isMockPatient(selectedPatient) ? (
+                  <>
+                    <RecordList
+                      title="Blood Reports"
+                      records={selectedPatient.medicalHistory?.bloodReports || []}
+                    />
+                    <RecordList
+                      title="X-Ray Reports"
+                      records={selectedPatient.medicalHistory?.xrays || []}
+                    />
+                    <RecordList
+                      title="ECG Reports"
+                      records={selectedPatient.medicalHistory?.ecgReports || []}
+                    />
+                    <RecordList
+                      title="General Reports"
+                      records={selectedPatient.medicalHistory?.generalReports || []}
+                    />
+                    <RecordList
+                      title="MRI Reports"
+                      records={selectedPatient.medicalHistory?.mriReports || []}
+                    />
+                    <RecordList
+                      title="CT Scan Reports"
+                      records={selectedPatient.medicalHistory?.ctScanReports || []}
+                    />
+                  </>
+                ) : (
+                  (() => {
+                    const files = selectedPatient.medicalFiles || [];
+                    const grouped = groupFilesByType(files);
+                    return (
+                      <>
+                        <div className="bg-white p-4 rounded-lg shadow">
+                          <h3 className="text-lg font-semibold mb-3">Blood Reports</h3>
+                          {grouped.blood.length > 0 ? (
+                            <ul>
+                              {grouped.blood.map((file, idx) => (
+                                <li key={idx} className="mb-2 flex items-center gap-2">
+                                  <span className="font-medium">{file.filename}</span>
+                                  <Button size="sm" variant="outline" onClick={() => handleViewReport(file)}>View Report</Button>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : <p className="text-gray-500">No records available</p>}
+                        </div>
+                        <div className="bg-white p-4 rounded-lg shadow">
+                          <h3 className="text-lg font-semibold mb-3">X-Ray Reports</h3>
+                          {grouped.xray.length > 0 ? (
+                            <ul>
+                              {grouped.xray.map((file, idx) => (
+                                <li key={idx} className="mb-2 flex items-center gap-2">
+                                  <span className="font-medium">{file.filename}</span>
+                                  <Button size="sm" variant="outline" onClick={() => handleViewReport(file)}>View Report</Button>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : <p className="text-gray-500">No records available</p>}
+                        </div>
+                        <div className="bg-white p-4 rounded-lg shadow">
+                          <h3 className="text-lg font-semibold mb-3">MRI Reports</h3>
+                          {grouped.mri.length > 0 ? (
+                            <ul>
+                              {grouped.mri.map((file, idx) => (
+                                <li key={idx} className="mb-2 flex items-center gap-2">
+                                  <span className="font-medium">{file.filename}</span>
+                                  <Button size="sm" variant="outline" onClick={() => handleViewReport(file)}>View Report</Button>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : <p className="text-gray-500">No records available</p>}
+                        </div>
+                        <div className="bg-white p-4 rounded-lg shadow">
+                          <h3 className="text-lg font-semibold mb-3">ECG Reports</h3>
+                          {grouped.ecg.length > 0 ? (
+                            <ul>
+                              {grouped.ecg.map((file, idx) => (
+                                <li key={idx} className="mb-2 flex items-center gap-2">
+                                  <span className="font-medium">{file.filename}</span>
+                                  <Button size="sm" variant="outline" onClick={() => handleViewReport(file)}>View Report</Button>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : <p className="text-gray-500">No records available</p>}
+                        </div>
+                        <div className="bg-white p-4 rounded-lg shadow">
+                          <h3 className="text-lg font-semibold mb-3">CT Scan Reports</h3>
+                          {grouped.ct.length > 0 ? (
+                            <ul>
+                              {grouped.ct.map((file, idx) => (
+                                <li key={idx} className="mb-2 flex items-center gap-2">
+                                  <span className="font-medium">{file.filename}</span>
+                                  <Button size="sm" variant="outline" onClick={() => handleViewReport(file)}>View Report</Button>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : <p className="text-gray-500">No records available</p>}
+                        </div>
+                        <div className="bg-white p-4 rounded-lg shadow">
+                          <h3 className="text-lg font-semibold mb-3">Prescriptions</h3>
+                          {grouped.prescription.length > 0 ? (
+                            <ul>
+                              {grouped.prescription.map((file, idx) => (
+                                <li key={idx} className="mb-2 flex items-center gap-2">
+                                  <span className="font-medium">{file.filename}</span>
+                                  <Button size="sm" variant="outline" onClick={() => handleViewReport(file)}>View Report</Button>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : <p className="text-gray-500">No records available</p>}
+                        </div>
+                        <div className="bg-white p-4 rounded-lg shadow">
+                          <h3 className="text-lg font-semibold mb-3">Other Files</h3>
+                          {grouped.other.length > 0 ? (
+                            <ul>
+                              {grouped.other.map((file, idx) => (
+                                <li key={idx} className="mb-2 flex items-center gap-2">
+                                  <span className="font-medium">{file.filename}</span>
+                                  <Button size="sm" variant="outline" onClick={() => handleViewReport(file)}>View Report</Button>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : <p className="text-gray-500">No records available</p>}
+                        </div>
+                      </>
+                    );
+                  })()
+                )}
               </div>
             </>
           ) : (

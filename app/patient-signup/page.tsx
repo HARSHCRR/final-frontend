@@ -28,7 +28,13 @@ export default function PatientSignup() {
   });
 
   const [medicalFiles, setMedicalFiles] = useState<MedicalFile[]>([]);
+
+  // Track descriptions by type
+  const [fileDescriptions, setFileDescriptions] = useState<Record<string, string>>({});
+
   const [isFingerprintScanned, setIsFingerprintScanned] = useState(false);
+  const [fingerprintImage, setFingerprintImage] = useState<string | null>(null);
+  const [fingerprintTemplate, setFingerprintTemplate] = useState<string | null>(null);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -45,20 +51,42 @@ export default function PatientSignup() {
     }));
   };
 
-  const handleFileUpload = (type: string, file: File, description: string) => {
-    setMedicalFiles(prev => [...prev, { type, file, description }]);
+  const handleFileUpload = (type: string, file: File) => {
+    setMedicalFiles(prev => {
+      // Remove any previous file of this type
+      const filtered = prev.filter(f => f.type !== type);
+      return [...filtered, { type, file, description: fileDescriptions[type] || "" }];
+    });
   };
 
-  const handleFingerprintScan = () => {
-    // Simulate fingerprint scan
-    setIsFingerprintScanned(true);
-    toast.success("Fingerprint scanned successfully!");
+  const handleDescriptionChange = (type: string, description: string) => {
+    setFileDescriptions(prev => ({ ...prev, [type]: description }));
+    setMedicalFiles(prev => prev.map(f => f.type === type ? { ...f, description } : f));
+  };
+
+  const handleFingerprintScan = async () => {
+    try {
+      const response = await fetch("http://localhost:8080/CallMorphoAPI?5", {
+        method: "POST"
+      });
+      const data = await response.json();
+      if (Number(data.ReturnCode) === 0) {
+        setFingerprintImage(`data:image/png;base64,${data.Base64BMPIMage}`);
+        setFingerprintTemplate(data.Base64ISOTemplate);
+        setIsFingerprintScanned(true);
+        toast.success("Fingerprint scanned successfully!");
+      } else {
+        toast.error("Device error: " + data.ReturnCode);
+      }
+    } catch (error) {
+      toast.error("Failed to connect to fingerprint device.");
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!isFingerprintScanned) {
+    if (!isFingerprintScanned || !fingerprintTemplate) {
       toast.error("Please scan your fingerprint first!");
       return;
     }
@@ -79,8 +107,14 @@ export default function PatientSignup() {
         formDataToSend.append(`medicalFiles[${index}][description]`, file.description);
       });
 
+      // Append fingerprint data
+      formDataToSend.append("fingerprintTemplate", fingerprintTemplate);
+      if (fingerprintImage) {
+        formDataToSend.append("fingerprintImage", fingerprintImage);
+      }
+
       // Send to backend
-      const response = await fetch("/api/patients/register", {
+      const response = await fetch("http://localhost:5000/register_patient", {
         method: "POST",
         body: formDataToSend,
       });
@@ -236,6 +270,11 @@ export default function PatientSignup() {
               >
                 {isFingerprintScanned ? "✓ Fingerprint Scanned" : "Scan Fingerprint"}
               </Button>
+              {fingerprintImage && (
+                <div className="mt-4">
+                  <img src={fingerprintImage} alt="Fingerprint" className="w-48 h-64 object-contain border" />
+                </div>
+              )}
             </div>
 
             {/* Medical Records Upload */}
@@ -251,7 +290,7 @@ export default function PatientSignup() {
                         onChange={(e) => {
                           const file = e.target.files?.[0];
                           if (file) {
-                            handleFileUpload(type, file, "");
+                            handleFileUpload(type, file);
                           }
                         }}
                         accept=".pdf,.jpg,.jpeg,.png"
@@ -262,12 +301,8 @@ export default function PatientSignup() {
                       <Input
                         type="text"
                         placeholder="Enter description"
-                        onChange={(e) => {
-                          const file = medicalFiles.find(f => f.type === type);
-                          if (file) {
-                            handleFileUpload(type, file.file, e.target.value);
-                          }
-                        }}
+                        value={fileDescriptions[type] || ""}
+                        onChange={(e) => handleDescriptionChange(type, e.target.value)}
                       />
                     </div>
                   </div>
